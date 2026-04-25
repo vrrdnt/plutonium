@@ -1,0 +1,187 @@
+{
+    "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+    "meta": {
+        "version": "PLCN_v3",
+        "update_url": null
+    },
+    "exported_at": "2026-04-25T00:00:00+00:00",
+    "name": "Plutonium T5 (Black Ops 1)",
+    "author": "vrrdnt@users.noreply.github.com",
+    "uuid": "a25fb405-fc5b-4361-a14b-5e3f3244148f",
+    "description": "Call of Duty: Black Ops 1 dedicated server powered by the Plutonium client, running under Wine. Supports both multiplayer (t5mp) and zombies (t5sp - yes, 'sp', because Plutonium hosts BO1 zombies via the singleplayer engine). Installs the xerxes-at/T5ServerConfig dedicated.cfg and dedicated_sp.cfg templates. Pre-creates the storage/t5/logs/ directory because T5 has a known bug where it does not auto-create them. Clients connect via session IDs from Plutonium's backend, not direct IP. T5 ZM RCon support is partial - log monitoring works for IW4MAdmin, but remote !commands are unreliable. Requires legally-owned BO1 game files in /home/container/game/ and a T5MP or T5SP server key.",
+    "image": null,
+    "tags": [],
+    "features": [],
+    "docker_images": {
+        "ghcr.io/pelican-eggs/yolks:wine": "ghcr.io/pelican-eggs/yolks:wine",
+        "ghcr.io/parkervcp/yolks:wine_latest": "ghcr.io/parkervcp/yolks:wine_latest"
+    },
+    "file_denylist": [],
+    "startup_commands": {
+        "Default": "bash /home/container/entrypoint.sh"
+    },
+    "config": {
+        "files": "{}",
+        "startup": "{\n    \"done\": \"Heartbeat successful\"\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\n# -----------------------------------------------------------------------------\n# Plutonium T5 (Black Ops 1) - Pelican install script\n# Runs in the installer container; server dir is /mnt/server, mapped to\n# /home/container at runtime.\n# -----------------------------------------------------------------------------\nset -e\n\napt-get update -qq\napt-get install -y --no-install-recommends curl ca-certificates tar unzip file git\n\nSERVER_DIR=\"/mnt/server\"\nPLUTO_DIR=\"${SERVER_DIR}/plutonium\"\nGAME_DIR=\"${SERVER_DIR}/game\"\nSTORAGE_DIR=\"${PLUTO_DIR}/storage/t5\"\nDEFAULTS_DIR=\"${PLUTO_DIR}/default-configs\"\nSCRIPTS_DIR=\"${STORAGE_DIR}/scripts\"\n\nmkdir -p \"${PLUTO_DIR}\" \"${GAME_DIR}\" \"${STORAGE_DIR}\" \"${DEFAULTS_DIR}\" \\\n    \"${SCRIPTS_DIR}/mp\" \"${STORAGE_DIR}/logs\"\n\n# Pre-create both possible log files. T5 has a known bug where it does NOT\n# auto-create the log directory or file, and silently produces no log output\n# without them. Confirmed across multiple Plutonium forum threads.\ntouch \"${STORAGE_DIR}/logs/games_mp.log\"\ntouch \"${STORAGE_DIR}/logs/games_zm.log\"\n\n# -----------------------------------------------------------------------------\n# Fetch mxve/plutonium-updater.rs.\n# -----------------------------------------------------------------------------\necho \"[install] Locating latest plutonium-updater release...\"\nUPDATER_URL=$(curl -sL https://api.github.com/repos/mxve/plutonium-updater.rs/releases/latest \\\n    | grep '\"browser_download_url\"' \\\n    | grep -Ei 'linux' \\\n    | grep -vi 'arm\\|aarch\\|musl\\|sha' \\\n    | grep -E '\\.tar\\.gz\"' \\\n    | head -1 \\\n    | cut -d '\"' -f 4)\n\nif [ -z \"${UPDATER_URL}\" ]; then\n    echo \"[install] Could not locate plutonium-updater linux asset. Aborting.\"\n    exit 1\nfi\n\necho \"[install] Downloading: ${UPDATER_URL}\"\ncurl -sL \"${UPDATER_URL}\" -o /tmp/updater.tar.gz\nmkdir -p /tmp/updater-extract\ntar -xzf /tmp/updater.tar.gz -C /tmp/updater-extract\n\nUPDATER_BIN=$(find /tmp/updater-extract -maxdepth 3 -type f -name 'plutonium-updater*' -executable | head -1)\nif [ -z \"${UPDATER_BIN}\" ]; then\n    UPDATER_BIN=$(find /tmp/updater-extract -maxdepth 3 -type f -name 'plutonium-updater*' | head -1)\nfi\nif [ -z \"${UPDATER_BIN}\" ]; then\n    echo \"[install] Could not find plutonium-updater binary in extracted archive.\"\n    ls -la /tmp/updater-extract\n    exit 1\nfi\n\nmv \"${UPDATER_BIN}\" \"${PLUTO_DIR}/plutonium-updater\"\nchmod +x \"${PLUTO_DIR}/plutonium-updater\"\n\n# -----------------------------------------------------------------------------\n# Pull Plutonium bootstrap files (mirrors all 4 games).\n# -----------------------------------------------------------------------------\necho \"[install] Fetching Plutonium bootstrap files...\"\n( cd \"${PLUTO_DIR}\" && ./plutonium-updater -d . --no-color )\n\nif [ ! -f \"${PLUTO_DIR}/bin/plutonium-bootstrapper-win32.exe\" ]; then\n    echo \"[install] plutonium-bootstrapper-win32.exe missing after updater run. Aborting.\"\n    exit 1\nfi\n\n# -----------------------------------------------------------------------------\n# Clone xerxes-at/T5ServerConfig and stage both cfgs as templates.\n#\n# Layout:\n#   localappdata/Plutonium/storage/t5/dedicated.cfg     - MP cfg\n#   localappdata/Plutonium/storage/t5/dedicated_sp.cfg  - ZM cfg (NOTE: _sp not _zm)\n#\n# Both are templated; entrypoint transforms the active one based on\n# SERVER_CONFIG and seeds it into storage/t5/.\n# -----------------------------------------------------------------------------\necho \"[install] Cloning xerxes-at/T5ServerConfig...\"\nrm -rf /tmp/t5cfg\ngit clone --depth 1 https://github.com/xerxes-at/T5ServerConfig.git /tmp/t5cfg\n\nXERXES_T5=\"/tmp/t5cfg/localappdata/Plutonium/storage/t5\"\nif [ ! -d \"${XERXES_T5}\" ]; then\n    echo \"[install] Unexpected repo layout; ${XERXES_T5} missing.\"\n    exit 1\nfi\n\necho \"[install] Staging dedicated.cfg and dedicated_sp.cfg as templates...\"\ncp \"${XERXES_T5}/dedicated.cfg\"     \"${DEFAULTS_DIR}/dedicated.cfg.template\"\ncp \"${XERXES_T5}/dedicated_sp.cfg\"  \"${DEFAULTS_DIR}/dedicated_sp.cfg.template\"\n\n# -----------------------------------------------------------------------------\n# Optional: install Resxt's T5 mapvote (MP only - he gave up on T5 ZM).\n# Two files, both go to storage/t5/scripts/mp/.\n# -----------------------------------------------------------------------------\nif [ \"${INSTALL_MAPVOTE:-0}\" = \"1\" ]; then\n    echo \"[install] INSTALL_MAPVOTE=1 -> installing Resxt T5 mapvote (MP only)...\"\n    MV_BASE=\"https://raw.githubusercontent.com/Resxt/Plutonium-T5-Scripts/main/mapvote\"\n    curl -fsSL \"${MV_BASE}/mapvote.gsc\"           -o \"${SCRIPTS_DIR}/mp/mapvote.gsc\"           || echo \"[install] WARN: mapvote.gsc download failed\"\n    curl -fsSL \"${MV_BASE}/mapvote_mp_extend.gsc\" -o \"${SCRIPTS_DIR}/mp/mapvote_mp_extend.gsc\" || echo \"[install] WARN: mapvote_mp_extend.gsc download failed\"\nelse\n    echo \"[install] INSTALL_MAPVOTE=0 -> skipping mapvote install.\"\nfi\n\n# -----------------------------------------------------------------------------\n# Optional: install ineedbots/bo1_bot_warfare v1.1.1.\n# Release zip layout:\n#   Move to root of Black Ops folder/mods/mp_bots/mp_bots.iwd\n# For dedicated server: copy mp_bots.iwd to storage/t5/mods/mp_bots/, then\n# extract its maps/ folder to storage/t5/maps/ (per Plutonium forum guide\n# https://forum.plutonium.pw/topic/22385).\n# -----------------------------------------------------------------------------\nif [ \"${INSTALL_BOTWARFARE:-0}\" = \"1\" ]; then\n    echo \"[install] INSTALL_BOTWARFARE=1 -> installing BO1 Bot Warfare v1.1.1...\"\n    curl -fsSL -L \"https://github.com/ineedbots/bo1_bot_warfare/releases/download/v1.1.1/bo1bw111.zip\" \\\n        -o /tmp/bo1bw.zip || echo \"[install] WARN: BW zip download failed\"\n    if [ -f /tmp/bo1bw.zip ]; then\n        rm -rf /tmp/bo1bw-extract\n        unzip -q /tmp/bo1bw.zip -d /tmp/bo1bw-extract\n        IWD=\"/tmp/bo1bw-extract/Move to root of Black Ops folder/mods/mp_bots/mp_bots.iwd\"\n        if [ -f \"${IWD}\" ]; then\n            mkdir -p \"${STORAGE_DIR}/mods/mp_bots\"\n            cp \"${IWD}\" \"${STORAGE_DIR}/mods/mp_bots/mp_bots.iwd\"\n            # Extract iwd's maps/ to storage/t5/maps/ for dedicated server use\n            rm -rf /tmp/bo1bw-iwd\n            mkdir -p /tmp/bo1bw-iwd\n            unzip -q \"${IWD}\" -d /tmp/bo1bw-iwd\n            if [ -d /tmp/bo1bw-iwd/maps ]; then\n                mkdir -p \"${STORAGE_DIR}/maps\"\n                cp -r /tmp/bo1bw-iwd/maps/* \"${STORAGE_DIR}/maps/\" 2>/dev/null || true\n                echo \"[install] Bot Warfare maps/ extracted to storage/t5/maps/\"\n            else\n                echo \"[install] WARN: maps/ folder not found inside mp_bots.iwd\"\n            fi\n            echo \"[install] Bot Warfare installed.\"\n        else\n            echo \"[install] WARN: mp_bots.iwd missing from release archive.\"\n        fi\n    fi\nelse\n    echo \"[install] INSTALL_BOTWARFARE=0 -> skipping Bot Warfare install.\"\nfi\n\n# -----------------------------------------------------------------------------\n# Write the runtime entrypoint.\n# -----------------------------------------------------------------------------\ncat > \"${SERVER_DIR}/entrypoint.sh\" <<'__PLUTO_ENTRYPOINT__'\n#!/bin/bash\n# -----------------------------------------------------------------------------\n# Plutonium T5 (Black Ops 1) server entrypoint for Pelican\n# -----------------------------------------------------------------------------\n# Env vars provided by the egg:\n#   PLUTO_KEY         Server key from https://platform.plutonium.pw/serverkeys\n#                     (must be T5MP or T5SP key matching GAME_MODE)\n#   GAME_MODE         t5mp | t5sp     (NOTE: t5sp for zombies, NOT t5zm)\n#   SERVER_CONFIG     dedicated.cfg | dedicated_sp.cfg\n#   SERVER_PORT       UDP port Wings allocated (default 28960)\n#   SERVER_NAME       Hostname injected into cfg sv_hostname\n#   IW4M_IP           IW4MAdmin host IP. Empty = rcon wide open.\n#   FS_GAME           mod folder under game/ (empty = vanilla)\n#   AUTO_UPDATE       0 | 1 - refresh Plutonium bootstrap files on start\n#   USE_XVFB          0 | 1 - wrap wine in xvfb-run\n# -----------------------------------------------------------------------------\n\nset -u\n\nCONTAINER_DIR=\"/home/container\"\nPLUTO_DIR=\"${CONTAINER_DIR}/plutonium\"\nGAME_DIR=\"${CONTAINER_DIR}/game\"\nSTORAGE_DIR=\"${PLUTO_DIR}/storage/t5\"\nDEFAULTS_DIR=\"${PLUTO_DIR}/default-configs\"\n\ncd \"${CONTAINER_DIR}\" || exit 1\n\n# T5 known bug: does not auto-create logs/ directory or log file. Always\n# ensure both exist before launch.\nmkdir -p \"${STORAGE_DIR}/logs\"\ntouch \"${STORAGE_DIR}/logs/games_mp.log\"\ntouch \"${STORAGE_DIR}/logs/games_zm.log\"\n\n# --- sanity: bootstrap present ----------------------------------------------\nif [ ! -f \"${PLUTO_DIR}/bin/plutonium-bootstrapper-win32.exe\" ]; then\n    echo \"[entrypoint] FATAL: Plutonium bootstrap not found at ${PLUTO_DIR}/bin/\"\n    echo \"[entrypoint] Run the Reinstall action on this server from the Pelican panel.\"\n    exit 1\nfi\n\n# --- optional: refresh Plutonium bootstrap files -----------------------------\nif [ \"${AUTO_UPDATE:-1}\" = \"1\" ] && [ -x \"${PLUTO_DIR}/plutonium-updater\" ]; then\n    echo \"[entrypoint] Checking for Plutonium bootstrap updates...\"\n    ( cd \"${PLUTO_DIR}\" && ./plutonium-updater -d . -q --no-color ) \\\n        || echo \"[entrypoint] WARN: updater failed; continuing with existing files.\"\nfi\n\n# --- sanity: game files uploaded --------------------------------------------\n# T5 sentinel: binkw32.dll (same as T6).\nif [ ! -f \"${GAME_DIR}/binkw32.dll\" ]; then\n    echo \"\"\n    echo \"[entrypoint] ============================================================\"\n    echo \"[entrypoint]  BO1 GAME FILES NOT FOUND\"\n    echo \"[entrypoint] ============================================================\"\n    echo \"[entrypoint]  Upload your legally-owned Black Ops 1 files to:\"\n    echo \"[entrypoint]    ${GAME_DIR}/\"\n    echo \"\"\n    echo \"[entrypoint]  Required entries (minimum):\"\n    echo \"[entrypoint]    binkw32.dll, localization_mp.txt, localization_zm.txt\"\n    echo \"[entrypoint]    main/iw_*.iwd\"\n    echo \"[entrypoint]    zone/all/*.ff (mp + zm fastfiles)\"\n    echo \"[entrypoint]    zone/english/*.ff\"\n    echo \"\"\n    echo \"[entrypoint]  Safe to omit: players/, redist/, sound/, video/,\"\n    echo \"[entrypoint]                *.ipak, sp_* zone files.\"\n    echo \"[entrypoint] ============================================================\"\n    exit 1\nfi\n\n# --- sanity: server key set --------------------------------------------------\nif [ -z \"${PLUTO_KEY:-}\" ] || [ \"${PLUTO_KEY}\" = \"CHANGE_ME\" ] || [ \"${PLUTO_KEY}\" = \"changeme\" ]; then\n    echo \"[entrypoint] FATAL: PLUTO_KEY variable is not set.\"\n    echo \"[entrypoint] Generate one at https://platform.plutonium.pw/serverkeys\"\n    case \"${GAME_MODE}\" in\n        t5mp) echo \"[entrypoint] Pick game = T5MP.\" ;;\n        t5sp) echo \"[entrypoint] Pick game = T5SP (zombies uses the SP engine).\" ;;\n        *) echo \"[entrypoint] Pick game variant matching GAME_MODE=${GAME_MODE}.\" ;;\n    esac\n    exit 1\nfi\n\n# --- seed config from template (first boot only) -----------------------------\nTARGET_CFG=\"${STORAGE_DIR}/${SERVER_CONFIG}\"\nTEMPLATE_CFG=\"${DEFAULTS_DIR}/${SERVER_CONFIG}.template\"\n\nif [ ! -f \"${TARGET_CFG}\" ]; then\n    if [ ! -f \"${TEMPLATE_CFG}\" ]; then\n        echo \"[entrypoint] FATAL: no template at ${TEMPLATE_CFG}\"\n        echo \"[entrypoint]        Valid SERVER_CONFIG: dedicated.cfg (MP), dedicated_sp.cfg (ZM)\"\n        exit 1\n    fi\n\n    echo \"[entrypoint] Seeding ${SERVER_CONFIG} from template (first boot)\"\n    mkdir -p \"${STORAGE_DIR}\"\n\n    # Same transform as T6/IW5: inject sv_hostname, replace rconWhitelistAdd\n    # block. Both T5 cfgs have the // B3, IW4MADMIN banner with rcon_rate_limit\n    # as the last rcon_* set line before the whitelist block.\n    python3 - \"${TEMPLATE_CFG}\" \"${TARGET_CFG}\" \"${SERVER_NAME:-Plutonium T5 Server}\" \"${IW4M_IP:-}\" <<'__PYEOF__'\nimport sys, re\nsrc, dst, hostname, iw4m_ip = sys.argv[1:5]\n\nwith open(src, 'r', encoding='utf-8', errors='replace') as f:\n    lines = f.readlines()\n\n# Strip existing rconWhitelistAdd lines (xerxes ships 4 example IPs)\nlines = [ln for ln in lines if not re.match(r'\\s*rconWhitelistAdd\\b', ln)]\n\n# T5 cfgs do not have sv_hostname by default. Insert one near the top after\n# the GENERAL CONFIGURATION banner.\nhostname_escaped = hostname.replace('\"', '\\\\\"')\nhostname_line = (\n    f'sets sv_hostname \"{hostname_escaped}\"           '\n    f'// Hostname shown in IW4MAdmin / console title.\\n'\n)\n\n# Insert above first \"set g_inactivity\" line which is the first line of the\n# GENERAL CONFIGURATION block in BOTH dedicated.cfg (MP) and dedicated_sp.cfg\n# (ZM). Using g_password as anchor would fail for ZM (no password feature).\nout = []\ninserted = False\nfor ln in lines:\n    if not inserted and re.match(r'\\s*set\\s+g_inactivity\\b', ln):\n        out.append(hostname_line)\n        inserted = True\n    out.append(ln)\nif not inserted:\n    out.insert(0, hostname_line)\n\n# Build whitelist block, splice in after rcon_rate_limit\nwhitelist_block = ['rconWhitelistAdd \"127.0.0.1\"                        '\n                   '// Loopback is always whitelisted.\\n']\nif iw4m_ip.strip():\n    whitelist_block.append(\n        f'rconWhitelistAdd \"{iw4m_ip.strip()}\"                        '\n        f'// IW4MAdmin host (set via IW4M_IP env var).\\n'\n    )\n\nfinal = []\ninserted_wl = False\nfor ln in out:\n    final.append(ln)\n    if not inserted_wl and re.match(r'\\s*set\\s+rcon_rate_limit\\b', ln):\n        final.extend(whitelist_block)\n        inserted_wl = True\n\nif not inserted_wl:\n    final.append('\\n')\n    final.extend(whitelist_block)\n\nwith open(dst, 'w', encoding='utf-8') as f:\n    f.writelines(final)\n\nprint(f\"[entrypoint]   hostname      : {hostname}\")\nprint(f\"[entrypoint]   IW4M whitelist: {iw4m_ip if iw4m_ip.strip() else '<none>'}\")\n__PYEOF__\n\n    if [ ! -f \"${TARGET_CFG}\" ]; then\n        echo \"[entrypoint] FATAL: template transform failed; ${TARGET_CFG} not written.\"\n        exit 1\n    fi\nfi\n\n# --- launch ------------------------------------------------------------------\ncd \"${PLUTO_DIR}\" || exit 1\n\n# Sanity-check mode/cfg pairing\ncase \"${GAME_MODE}:${SERVER_CONFIG}\" in\n    t5mp:dedicated.cfg) : ;;\n    t5sp:dedicated_sp.cfg) : ;;\n    *)\n        echo \"[entrypoint] WARN: GAME_MODE=${GAME_MODE} with SERVER_CONFIG=${SERVER_CONFIG}\"\n        echo \"[entrypoint]       Expected pairs: t5mp+dedicated.cfg, t5sp+dedicated_sp.cfg\"\n        echo \"[entrypoint]       Continuing anyway.\"\n        ;;\nesac\n\necho \"[entrypoint] Starting Plutonium T5 (Black Ops 1) dedicated server\"\necho \"[entrypoint]   mode    : ${GAME_MODE}\"\necho \"[entrypoint]   config  : ${SERVER_CONFIG}\"\necho \"[entrypoint]   port    : ${SERVER_PORT}\"\necho \"[entrypoint]   game    : ${GAME_DIR}\"\necho \"[entrypoint]   fs_game : ${FS_GAME:-<none>}\"\n\n# T5 uses +exec (not +set sv_config) and +map_rotate (not +start_map_rotate).\n# Confirmed against xerxes-at/T5ServerConfig/!start_mp_server.bat and\n# !start_zm_server.bat.\nWINE_CMD=( wine bin/plutonium-bootstrapper-win32.exe\n    \"${GAME_MODE}\"\n    \"${GAME_DIR}\"\n    -dedicated\n    +set key      \"${PLUTO_KEY}\"\n    +set net_port \"${SERVER_PORT}\"\n    +exec         \"${SERVER_CONFIG}\"\n    +map_rotate )\n\nif [ -n \"${FS_GAME:-}\" ]; then\n    WINE_CMD=( \"${WINE_CMD[@]:0:8}\" +set fs_game \"${FS_GAME}\" \"${WINE_CMD[@]:8}\" )\nfi\n\nif [ \"${USE_XVFB:-0}\" = \"1\" ]; then\n    exec xvfb-run --auto-servernum \"${WINE_CMD[@]}\"\nelse\n    exec \"${WINE_CMD[@]}\"\nfi\n__PLUTO_ENTRYPOINT__\nchmod +x \"${SERVER_DIR}/entrypoint.sh\"\n\n# -----------------------------------------------------------------------------\n# README\n# -----------------------------------------------------------------------------\ncat > \"${SERVER_DIR}/READ_ME_FIRST.txt\" <<'__PLUTO_README__'\nPlutonium T5 (Black Ops 1) server - next steps\n==============================================\n\n1. Upload your LEGALLY-OWNED Black Ops 1 game files to:\n     /home/container/game/\n\n   Required entries (minimum):\n     binkw32.dll, localization_mp.txt, localization_zm.txt\n     main/iw_*.iwd\n     zone/all/*.ff   (mp + zm fastfiles)\n     zone/english/*.ff\n\n   Safe to omit: players/, redist/, sound/, video/, *.ipak, sp_* zone files.\n   Slimmed install ~3GB vs full ~11GB.\n\n2. Generate a server key at https://platform.plutonium.pw/serverkeys\n   - Pick game = T5MP for multiplayer, T5SP for zombies (zombies uses\n     the SP engine on Plutonium).\n   - Set the key as PLUTO_KEY on the Startup tab.\n   - Hostname IS shown in the in-browser server list.\n\n3. Set GAME_MODE (t5mp | t5sp), SERVER_CONFIG (dedicated.cfg | dedicated_sp.cfg),\n   SERVER_NAME, and IW4M_IP on Startup tab.\n\n4. Start the server. On first boot, the cfg is seeded at:\n     /home/container/plutonium/storage/t5/dedicated.cfg     (MP)\n     /home/container/plutonium/storage/t5/dedicated_sp.cfg  (ZM)\n\n   Edit it to set rcon_password (required for IW4MAdmin) and tweak\n   sv_maprotation.\n\n5. T5 connection model:\n   - Clients CANNOT directly connect by IP. They connect via session IDs\n     from Plutonium's backend.\n   - You still need to forward UDP 28960 (or whatever SERVER_PORT is)\n     for actual game traffic. Session IDs are just NAT-traversal helpers.\n   - Server still appears in the in-game browser and at\n     https://list.plutools.pw/t5mp / /t5sp once registered.\n\n6. IW4MAdmin server entry block:\n     {\n       \"IPAddress\": \"127.0.0.1\",\n       \"Port\": <SERVER_PORT>,\n       \"Password\": \"<rcon_password from cfg>\",\n       \"ManualLogPath\": \"/home/container/.wine/drive_c/users/container/AppData/Local/Plutonium/storage/t5/logs/games_mp.log\",\n       \"RConParserVersion\": \"Plutonium T5 Parser\",\n       \"EventParserVersion\": \"Plutonium T5 Parser\",\n       \"ReservedSlotNumber\": 0\n     }\n\n   For ZM, change ManualLogPath to .../logs/games_zm.log and Port to\n   the zombies server's port. Same parser strings (one parser handles both).\n\n   WARNING: T5 ZM RCon is partial - log monitoring works, but !commands\n   and remote actions are unreliable. This is a Plutonium engine\n   limitation, not a config issue.\n\n\"Heartbeat successful\" in the log = live and registered.\n__PLUTO_README__\n\necho \"[install] ============================================================\"\necho \"[install]  T5 install complete.\"\necho \"[install]  xerxes-at templates staged at plutonium/default-configs/.\"\necho \"[install]  Log dir + files pre-created (T5 won't auto-create them).\"\necho \"[install]  Upload BO1 game files to /home/container/game/ then start.\"\necho \"[install] ============================================================\"\n",
+            "container": "ghcr.io/pelican-eggs/installers:debian",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Plutonium Server Key",
+            "description": "Server key from https://platform.plutonium.pw/serverkeys. Pick the matching game variant when generating (T5MP for MP, T5SP for ZM). The hostname registered on the platform is the REAL in-browser hostname; the cfg sv_hostname only sets the IW4MAdmin/console title.",
+            "env_variable": "PLUTO_KEY",
+            "default_value": "CHANGE_ME",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "string",
+                "max:128"
+            ],
+            "sort": 1
+        },
+        {
+            "name": "Server Name (cfg sv_hostname)",
+            "description": "Hostname injected into sv_hostname in the cfg. Supports ^1-^9 color codes. Note: in-browser hostname comes from the platform server key, not this value.",
+            "env_variable": "SERVER_NAME",
+            "default_value": "^1Plutonium ^7T5 Server",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "string",
+                "max:64"
+            ],
+            "sort": 2
+        },
+        {
+            "name": "IW4MAdmin Host IP",
+            "description": "IP address of the IW4MAdmin host. Added to rconWhitelistAdd along with 127.0.0.1. Leave empty if IW4MAdmin runs on the same host or if you don't use IW4MAdmin.",
+            "env_variable": "IW4M_IP",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "nullable",
+                "string",
+                "max:45"
+            ],
+            "sort": 3
+        },
+        {
+            "name": "Game Mode",
+            "description": "Plutonium T5 game variant. t5mp = multiplayer, t5sp = zombies (yes, 'sp' - BO1 zombies runs on the singleplayer engine on Plutonium, unlike T6 which uses 't6zm'). Must match the server-key game variant.",
+            "env_variable": "GAME_MODE",
+            "default_value": "t5mp",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "string",
+                "in:t5mp,t5sp"
+            ],
+            "sort": 4
+        },
+        {
+            "name": "Server Config File",
+            "description": "Cfg file inside plutonium/storage/t5/ that the server +exec's. Pair: dedicated.cfg with t5mp; dedicated_sp.cfg with t5sp. Templates from xerxes-at/T5ServerConfig are seeded on first boot.",
+            "env_variable": "SERVER_CONFIG",
+            "default_value": "dedicated.cfg",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "string",
+                "in:dedicated.cfg,dedicated_sp.cfg"
+            ],
+            "sort": 5
+        },
+        {
+            "name": "Install Mapvote",
+            "description": "INSTALL-TIME ONLY. When set to 1, downloads Resxt's T5 mapvote scripts (mapvote.gsc + mapvote_mp_extend.gsc) into plutonium/storage/t5/scripts/mp/. MP only - Resxt does not support T5 zombies. Reinstall to toggle.",
+            "env_variable": "INSTALL_MAPVOTE",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "boolean"
+            ],
+            "sort": 6
+        },
+        {
+            "name": "Install Bot Warfare",
+            "description": "INSTALL-TIME ONLY. When set to 1, downloads ineedbots/bo1_bot_warfare v1.1.1 (mp_bots.iwd) into plutonium/storage/t5/mods/mp_bots/ and extracts its maps/ folder to plutonium/storage/t5/maps/ (per the canonical T5 Bot Warfare install guide).",
+            "env_variable": "INSTALL_BOTWARFARE",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "boolean"
+            ],
+            "sort": 7
+        },
+        {
+            "name": "Auto-Update Plutonium",
+            "description": "Run plutonium-updater on every server start to refresh bootstrap files. 1 = enabled (recommended), 0 = disabled.",
+            "env_variable": "AUTO_UPDATE",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "boolean"
+            ],
+            "sort": 8
+        },
+        {
+            "name": "fs_game (mod path)",
+            "description": "Mod folder relative to the game dir, e.g. 'mods/mymod'. Leave empty for vanilla. Passed as +set fs_game only if non-empty.",
+            "env_variable": "FS_GAME",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "nullable",
+                "string",
+                "max:128"
+            ],
+            "sort": 9
+        },
+        {
+            "name": "Use Xvfb",
+            "description": "Wrap Wine in xvfb-run. Leave at 0 unless the server fails with display/X11 errors (dedicated normally doesn't need it).",
+            "env_variable": "USE_XVFB",
+            "default_value": "0",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": [
+                "required",
+                "boolean"
+            ],
+            "sort": 10
+        },
+        {
+            "name": "Wine Debug",
+            "description": "WINEDEBUG value. Default suppresses all Wine chatter. Set to 'fixme-all' to debug Wine issues.",
+            "env_variable": "WINEDEBUG",
+            "default_value": "-all",
+            "user_viewable": false,
+            "user_editable": false,
+            "rules": [
+                "required",
+                "string"
+            ],
+            "sort": 11
+        }
+    ]
+}
